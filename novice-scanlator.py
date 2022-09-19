@@ -600,6 +600,15 @@ class SidePanel():
 
     threshold: IntVar
         the value of the threshold slider widget
+
+    run_ocr_button: Button
+        the button for manually running OCR
+
+    run_translation_button: Button
+        the button for manually running translation
+
+    export_button: Button
+        the button for exporting
     """
 
     def __init__(self, root):
@@ -645,6 +654,18 @@ class SidePanel():
         self.threshold_slider = tk.Scale(
             self.frame, variable=self.threshold, orient='horizontal', from_=0, to=254)
         self.threshold_slider.pack(side="top", fill=tk.BOTH)
+
+        # run ocr button
+        self.run_ocr_button = Button(self.frame, text="Run OCR")
+        self.run_ocr_button.pack(side="top", fill=tk.BOTH)
+
+        # run translation button
+        self.run_translation_button = Button(self.frame, text="Run Translation")
+        self.run_translation_button.pack(side="top", fill=tk.BOTH)
+
+        # export button
+        self.export_button = Button(self.frame, text="Export")
+        self.export_button.pack(side="top", fill=tk.BOTH)
 
 
 class Controller:
@@ -747,9 +768,14 @@ class Controller:
             'write', self.update_is_vertical_data)
         self.view.sidepanel.threshold.trace_add(
             'write', self.update_preview_image)
+        
+        # sidepanel widget bindings
+        self.view.sidepanel.run_ocr_button.bind('<Button-1>', self.run_ocr_button_clicked)
+        self.view.sidepanel.run_translation_button.bind('<Button-1>', self.run_translation_button_clicked)
+        self.view.sidepanel.export_button.bind('<Button-1>', self.export_button_clicked)
 
         # file menu command bindings
-        self.view.file.entryconfig(0, command=self.model.save_file)
+        self.view.file.entryconfig(0, command=lambda: self.model.save_file(self.source_directory))
         self.view.file.entryconfig(1, command=lambda: self.open_image_file_by_path(
             self.get_file_path_by_open_file_dialog()))
         self.view.file.entryconfig(2, command=self.next_file)
@@ -954,7 +980,7 @@ class Controller:
         file, formatted for open_image_file_by_path.
         """
         pathArg = filedialog.askopenfilename(title="Select Image", filetypes=(
-            ("png files", ".png")), initialdir=self.source_directory)
+            ("png files", ".png"),("jpg files", ".jpg")), initialdir=self.source_directory)
         split_path = pathArg.split("/")
         return split_path[len(split_path) - 1]
 
