@@ -1,5 +1,5 @@
 # Novice_Scanlator
-This is a tool to assist in quick-and-dirty file scanlation. It is a WIP.
+This is a tool to assist in quick-and-dirty file scanlation. It opens an image file, allows you to select blocks of text, which it then scans, translates from Japanese to English, and replaces with the English text. It is a WIP.
 
 - When run, it first prompts you to select the directory containing the image files to be scanlated. It is only set up to work with .png files currently.
 - It then prompts you to choose the first image file to scanlate.
