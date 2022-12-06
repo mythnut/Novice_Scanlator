@@ -1,9 +1,13 @@
 # import the following libraries
+from enum import Enum
 import io
+from json import tool
 import os
+import re
 
 # will convert the image to text string
 import pytesseract
+from pytesseract import Output
 
 # adds image processing capabilities
 from PIL import Image as ig, ImageTk, ImageDraw, ImageFont
@@ -75,7 +79,7 @@ def make_ocr_ready(img: Image, is_inverted: bool, threshold: int) -> Image:
     return img
 
 
-def run_translation(untranslated_text: str) -> str:
+def get_translation(untranslated_text: str) -> str:
     """
     Translates text in Japanese to English
 
@@ -138,6 +142,16 @@ class SelectionItem():
                           sort_keys=True, indent=4)
 
 
+class ToolType(Enum):
+    SELECT = 0
+    ADD = 1
+    CROP = 2
+    DELETE = 3
+    JOIN = 4
+    SPLIT = 5
+    TRANSFORM = 6
+
+
 class Model():
     """
     All the data
@@ -169,13 +183,23 @@ class Model():
     """
 
     def __init__(self):
-        self.paths = sorted(glob.glob('*.png'))
+        self.paths = []
+        self.unsaved_changes = False
+        self.select_opts = dict(dash=(2, 2), fill='magenta', stipple='gray25', outline='black', disabledoutline='blue',
+                                disabledfill='blue', disabledstipple='gray12', state=tk.DISABLED, tags='selection')
+
+    def set_directory(self, path: str):
+        allfiles = glob.glob(path + '/*')
+        paths = []
+        for file in allfiles:
+            if re.search(r'.+\.(png|jpg|jpeg)', file):
+                split_file = file.split("\\")
+                paths.append(split_file[split_file.__len__() - 1])
+        self.paths = sorted(paths)
         self.selection_item_data = {
             path:
             [SelectionItem()]
             for path in self.paths}
-        self.select_opts = dict(dash=(2, 2), fill='magenta', stipple='gray25', outline='black', disabledoutline='white',
-                                disabledfill='white', disabledstipple='gray12', state=tk.DISABLED, tags='selection')
 
     def add_row(self, path: str):
         """
@@ -227,6 +251,7 @@ class Model():
         """
         json_conversion_data = {}
         for path in self.paths:
+            # TODO: skip if no data
             path_data = []
             for s in self.selection_item_data[path]:
                 path_data.append({"coords": s.coords, "ocr_output": s.ocr_output, "is_inverted": s.is_inverted,
@@ -234,6 +259,7 @@ class Model():
             json_conversion_data[path] = path_data
         with io.open(source_directory + "/json-data.json", 'w', encoding="utf-16") as outfile:
             json.dump(json_conversion_data, outfile, ensure_ascii=False)
+        self.unsaved_changes = False
 
     def startup_check(self, source_directory: str):
         """
@@ -250,7 +276,7 @@ class Model():
             * If json-data.json doesn't exist in the source directory, it is
             created
         """
-        if os.path.isfile('json-data.json') and os.access('json-data.json', os.R_OK):
+        if os.path.isfile(source_directory + "/json-data.json") and os.access(source_directory + "/json-data.json", os.R_OK):
             # checks if file exists
             print("File exists and is readable")
             with io.open(source_directory + "/json-data.json", 'r', encoding="utf-16") as infile:
@@ -275,7 +301,6 @@ class Model():
                         self.selection_item_data[path] = selection_items
         else:
             print("Either file is missing or is not readable, creating file...")
-            self.save_file(source_directory)
 
 
 class View(Frame):
@@ -318,8 +343,8 @@ class View(Frame):
     box_height: IntVar
         the height of the currently active selection box
 
-    rects: list[tuple[int, int, int, int]]
-        a list of sets of coordinates for all selection
+    box_ids: list[int]]
+        a list of canvas Ids all selection
         boxes for the current image
 
     selection_index: int
@@ -407,10 +432,6 @@ class View(Frame):
         self.canvas.bind("<ButtonPress-2>", self.scroll_start)
         self.canvas.bind("<B2-Motion>", self.scroll_move)
 
-        # selection box dragging bindings
-        self.canvas.bind("<ButtonPress-1>", self.select_start)
-        self.canvas.bind("<B1-Motion>", self.select_move)
-
         # variables
         # selection box dragging variables
         self.mouse_down_x = IntVar(value=0)
@@ -421,7 +442,7 @@ class View(Frame):
         self.box_width = IntVar(value=0)
         self.box_height = IntVar(value=0)
         # box ids
-        self.boxes = []
+        self.box_ids = []
         # index of active box
         self.selection_index = 0
 
@@ -455,53 +476,6 @@ class View(Frame):
         """
         self.canvas.scan_dragto(event.x, event.y, gain=1)
 
-    def select_start(self, event: Event):
-        """
-        Bound to left mouse button down. 
-        Part 1 of clicking-and-dragging to position a box
-
-        Parameters
-        ----------
-        event: Event
-            the left mouse button down event, the
-            coordinates of which are to be remembered
-
-        Side Effects
-        -----------
-            The values of box_x_position, mouse_down_x, box_y_position and
-            mouse_down_y are changed
-        """
-        self.box_x_position.set(self.canvas.canvasx(event.x))
-        self.mouse_down_x.set(self.canvas.canvasx(event.x))
-        self.box_y_position.set(self.canvas.canvasy(event.y))
-        self.mouse_down_y.set(self.canvas.canvasy(event.y))
-
-    def select_move(self, event: Event):
-        """
-        Bound to left mouse button held down. 
-        Part 2 of clicking-and-dragging to position a box.
-
-        Parameters
-        ----------
-        event: Event
-            the left mouse button held down event, the
-            coordinates of which are used to set the
-            box's bounds
-
-        Side Effects
-        -----------
-            box_x_position, box_width, box_y_position and box_height are changed
-        """
-        self.box_x_position.set(
-            min(self.mouse_down_x.get(), self.canvas.canvasx(event.x)))
-        self.box_width.set(abs(self.mouse_down_x.get() -
-                           self.canvas.canvasx(event.x)))
-        self.box_y_position.set(
-            min(self.mouse_down_y.get(), self.canvas.canvasy(event.y)))
-        self.box_height.set(abs(self.mouse_down_y.get() -
-                            self.canvas.canvasy(event.y)))
-        self.redraw_active_box()
-
     def do_popup(self, event: Event):
         """
         open right click menu
@@ -525,8 +499,12 @@ class View(Frame):
         ------------
             A canvas item is changed.
         """
-        self.canvas.coords(self.boxes[self.selection_index], self.box_x_position.get(
-        ), self.box_y_position.get(), self.box_x_position.get() + self.box_width.get(), self.box_height.get()+self.box_y_position.get())
+        x0 = self.box_x_position.get()
+        y0 = self.box_y_position.get()
+        x1 = self.box_x_position.get() + self.box_width.get()
+        y1 = self.box_height.get()+self.box_y_position.get()
+        self.canvas.coords(self.selection_box_id, x0, y0, x1, y1)
+        self.canvas.tag_raise(self.selection_box_id,self.image_id)
 
     def change_active_box(self, new_index: int):
         """
@@ -548,13 +526,13 @@ class View(Frame):
         """
         if self.selection_index < self.sidepanel.selection_list.size():
             self.canvas.itemconfigure(
-                self.boxes[self.selection_index], state=tk.DISABLED)
+                self.box_ids[self.selection_index], state=tk.DISABLED)
         self.selection_index = min(
             self.sidepanel.selection_list.size() - 1, new_index)
         self.sidepanel.selection_list.selection_set(self.selection_index)
         self.canvas.itemconfigure(
-            self.boxes[self.selection_index], state=tk.NORMAL)
-        x0, y0, x1, y1 = self.canvas.coords(self.boxes[self.selection_index])
+            self.box_ids[self.selection_index], state=tk.NORMAL)
+        x0, y0, x1, y1 = self.canvas.coords(self.box_ids[self.selection_index])
         self.box_x_position.set(x0)
         self.box_width.set(x1-x0)
         self.box_y_position.set(y0)
@@ -660,12 +638,27 @@ class SidePanel():
         self.run_ocr_button.pack(side="top", fill=tk.BOTH)
 
         # run translation button
-        self.run_translation_button = Button(self.frame, text="Run Translation")
+        self.run_translation_button = Button(
+            self.frame, text="Run Translation")
         self.run_translation_button.pack(side="top", fill=tk.BOTH)
 
         # export button
         self.export_button = Button(self.frame, text="Export")
         self.export_button.pack(side="top", fill=tk.BOTH)
+
+        # toggle display mode button
+        self.toggle_display_mode_button = Button(
+            self.frame, text="Toggle Display Mode")
+        self.toggle_display_mode_button.pack(side="top", fill=tk.BOTH)
+
+        # get bounding boxes button
+        self.get_bounding_boxes_button = Button(
+            self.frame, text="Get Bounding Boxes")
+        self.get_bounding_boxes_button.pack(side="top", fill=tk.BOTH)
+
+        # tool type label
+        self.tool_type_label = Label(self.frame)
+        self.tool_type_label.pack(side="top", fill=tk.BOTH)
 
 
 class Controller:
@@ -754,8 +747,16 @@ class Controller:
         self.root = tk.Tk()
         self.root.title('Novice Scanlator App')
         self.path = ""
+        self.display_mode = "box"
+        # choose source directory
+        self.source_directory = filedialog.askdirectory(
+            title="Select Directory")
         # create model
         self.model = Model()
+        # set directory
+        self.model.set_directory(self.source_directory)
+        # load data if it exists
+        self.model.startup_check(self.source_directory)
         # create view
         self.view = View(self.root)
 
@@ -768,14 +769,22 @@ class Controller:
             'write', self.update_is_vertical_data)
         self.view.sidepanel.threshold.trace_add(
             'write', self.update_preview_image)
-        
+
         # sidepanel widget bindings
-        self.view.sidepanel.run_ocr_button.bind('<Button-1>', self.run_ocr_button_clicked)
-        self.view.sidepanel.run_translation_button.bind('<Button-1>', self.run_translation_button_clicked)
-        self.view.sidepanel.export_button.bind('<Button-1>', self.export_button_clicked)
+        self.view.sidepanel.run_ocr_button.bind(
+            '<Button-1>', self.run_ocr_button_clicked)
+        self.view.sidepanel.run_translation_button.bind(
+            '<Button-1>', self.run_translation_button_clicked)
+        self.view.sidepanel.export_button.bind(
+            '<Button-1>', self.export_button_clicked)
+        self.view.sidepanel.toggle_display_mode_button.bind(
+            '<Button-1>', self.toggle_display_mode_button_clicked)
+        self.view.sidepanel.get_bounding_boxes_button.bind(
+            '<Button-1>', self.get_bounding_boxes_button_clicked)
 
         # file menu command bindings
-        self.view.file.entryconfig(0, command=lambda: self.model.save_file(self.source_directory))
+        self.view.file.entryconfig(
+            0, command=lambda: self.model.save_file(self.source_directory))
         self.view.file.entryconfig(1, command=lambda: self.open_image_file_by_path(
             self.get_file_path_by_open_file_dialog()))
         self.view.file.entryconfig(2, command=self.next_file)
@@ -800,16 +809,71 @@ class Controller:
         self.view.right_click_menu.entryconfig(
             5, command=self.export_button_clicked)
 
-        # canvas panning bindings
+        # additional canvas mouse click bindings
+        self.view.canvas.bind("<ButtonPress-1>", self.select_start)
+        self.view.canvas.bind("<B1-Motion>", self.select_move)
         self.view.canvas.bind("<ButtonRelease-1>", self.select_end)
         self.view.canvas.bind("<Button-3>", self.view.do_popup)
 
-        # choose source directory
-        self.source_directory = filedialog.askdirectory(title="Select Directory")
-        # load data if it exists
-        self.model.startup_check(self.source_directory)
+        # tool type
+        self.tool_type = ToolType.SELECT
+        self.view.sidepanel.tool_type_label.configure(text=self.tool_type.name)
+        self.root.bind('e', lambda event: self.next_tool_type())
+        self.root.bind('q', lambda event: self.prev_tool_type())
+        self.root.bind('<Tab>', self.next_file_hotkey)
+        self.root.bind('<Shift-Tab>', self.prev_file_hotkey)
+        self.root.bind('<Control-s>', lambda event: self.model.save_file())
+        self.root.bind('a', lambda event: self.set_tool_type(ToolType.ADD))
+        self.root.bind('s', lambda event: self.set_tool_type(ToolType.SELECT))
+        self.root.bind('d', lambda event: self.set_tool_type(ToolType.DELETE))
+        self.root.bind('f', lambda event: self.set_tool_type(ToolType.JOIN))
+        self.root.bind('z', lambda event: self.set_tool_type(ToolType.TRANSFORM))
+        self.root.bind('x', lambda event: self.set_tool_type(ToolType.SPLIT))
+        self.root.bind('c', lambda event: self.set_tool_type(ToolType.CROP))
+        self.view.canvas.bind("<Motion>",self.update_cursor)
+
+        self.transform_move = False
+        (self.transform_x0,self.transform_y0,self.transform_x1,self.transform_y1) = (False,False,False,False)
+        self.remember_coords = (0,0,0,0)
+        self.transform_offset = (0,0)
+
+
+
         # open file
         self.open_image_file_by_path(self.get_file_path_by_open_file_dialog())
+
+        select_opts = dict(dash=(2, 2), fill='magenta', stipple='gray25', outline='black', disabledoutline='blue',
+                                disabledfill='blue', disabledstipple='gray12', state=tk.DISABLED, tags='tool')
+        self.view.selection_box_id = self.view.canvas.create_rectangle((0,0,0,0),**select_opts)
+
+    def update_cursor(self, event):
+        canvas_x = self.view.canvas.canvasx(event.x)
+        canvas_y = self.view.canvas.canvasy(event.y)
+        # TODO: make collision box larger
+        boxes = list(set(self.view.canvas.find_overlapping(canvas_x,canvas_y,canvas_x,canvas_y)).intersection(set(self.view.box_ids)))
+        if len(boxes) > 0 and self.tool_type == ToolType.TRANSFORM:
+            box = self.model.selection_item_data[self.path][self.get_data_index_from_box_id(
+            boxes[0])].coords
+            if (canvas_x - box[0] <= 10 and canvas_y - box[1] <= 10) or (box[2] - canvas_x <= 10 and box[3] - canvas_y <= 10):
+                self.view.canvas.config(cursor="@downright_upleft_double_arrow.cur")
+            elif (canvas_x - box[0] <= 10 and box[3] - canvas_y <= 10) or (box[2] - canvas_x <= 10 and canvas_y - box[1] <= 10):
+                self.view.canvas.config(cursor="@upright_downleft_double_arrow.cur")
+            elif canvas_x - box[0] <= 10 or box[2] - canvas_x <= 10:
+                self.view.canvas.config(cursor="@horizontal_double_arrow.cur")
+            elif canvas_y - box[1] <= 10 or box[3] - canvas_y <= 10:
+                self.view.canvas.config(cursor="@up_down_double_arrow.cur")
+            else:
+                self.view.canvas.config(cursor="fleur")
+        else:
+            self.view.canvas.config(cursor="arrow")
+
+    def next_file_hotkey(self, event: None):
+        self.next_file()
+        return 'break'
+        
+    def prev_file_hotkey(self, event: None):
+        self.prev_file()
+        return 'break'
 
     def on_listbox_select(self, event: Event):
         """
@@ -968,11 +1032,20 @@ class Controller:
             * The canvas is updated
             * view.boxes is updated
         """
-        self.view.boxes.clear()
+        self.view.box_ids.clear()
         self.view.canvas.delete('selection')
-        for i in self.model.selection_item_data[path]:
-            self.view.boxes.append(self.view.canvas.create_rectangle(
-                i.coords[0], i.coords[1], i.coords[2], i.coords[3], **self.model.select_opts))
+        if self.display_mode == "box":
+            for i in self.model.selection_item_data[path]:
+                self.view.box_ids.append(self.view.canvas.create_rectangle(
+                    i.coords[0], i.coords[1], i.coords[2], i.coords[3], **self.model.select_opts))
+        else:
+            select_opts = dict(fill='white', stipple='',
+                               width=0, state=tk.NORMAL, tags='selection')
+            for i in self.model.selection_item_data[path]:
+                self.view.box_ids.append(self.view.canvas.create_rectangle(
+                    i.coords[0], i.coords[1], i.coords[2], i.coords[3], **select_opts))
+                self.view.canvas.create_text(
+                    (i.coords[0] + i.coords[2])/2, (i.coords[1] + i.coords[3])/2, text=i.translation, tags='selection', font=('Arial', '12'), width=i.coords[2]-i.coords[0])
 
     def get_file_path_by_open_file_dialog(self) -> str:
         """
@@ -980,7 +1053,7 @@ class Controller:
         file, formatted for open_image_file_by_path.
         """
         pathArg = filedialog.askopenfilename(title="Select Image", filetypes=(
-            ("png files", ".png"),("jpg files", ".jpg")), initialdir=self.source_directory)
+            ("png files", ".png"), ("jpg files", ".jpg"), ("jpg files", ".jpeg")), initialdir=self.source_directory)
         split_path = pathArg.split("/")
         return split_path[len(split_path) - 1]
 
@@ -1005,7 +1078,7 @@ class Controller:
         # open the new image
         self.image = ig.open(self.source_directory + "/" + path)
         img = ImageTk.PhotoImage(self.image)
-        self.view.canvas.create_image(
+        self.view.image_id = self.view.canvas.create_image(
             0, 0, image=img, anchor=tk.NW, tag="img")
         self.view.canvas.img = img  # Keep reference.
 
@@ -1043,6 +1116,91 @@ class Controller:
         else:
             self.open_image_file_by_path(self.model.paths[path_index - 1])
 
+    def select_start(self, event: Event):
+        """
+        Bound to left mouse button down. 
+        Part 1 of clicking-and-dragging to position a box
+
+        Parameters
+        ----------
+        event: Event
+            the left mouse button down event, the
+            coordinates of which are to be remembered
+
+        Side Effects
+        -----------
+            The values of box_x_position, mouse_down_x, box_y_position and
+            mouse_down_y are changed
+        """
+        # TODO: include transform_offset for the offset between cursor position and rectangle corner/side
+        canvas_x = self.view.canvas.canvasx(event.x)
+        canvas_y = self.view.canvas.canvasy(event.y)
+        self.view.box_x_position.set(canvas_x)
+        self.view.mouse_down_x.set(canvas_x)
+        self.view.box_y_position.set(canvas_y)
+        self.view.mouse_down_y.set(canvas_y)
+        if self.tool_type == ToolType.TRANSFORM:
+            boxes = list(set(self.view.canvas.find_overlapping(canvas_x,canvas_y,canvas_x,canvas_y)).intersection(set(self.view.box_ids)))
+            if len(boxes) > 0:
+                self.view.sidepanel.selection_list.selection_clear(self.view.selection_index)
+                self.view.change_active_box(self.get_data_index_from_box_id(boxes[0]))
+                self.load_selection_data(self.path,self.view.selection_index)
+                box = self.model.selection_item_data[self.path][self.get_data_index_from_box_id(
+                boxes[0])].coords
+                self.transform_offset = (canvas_x - box[0],canvas_y - box[1])
+                if not(canvas_x - box[0] <= 10 or canvas_y - box[1] <= 10 or box[2] - canvas_x <= 10 or box[3] - canvas_y <= 10):
+                    self.transform_move = True
+                else:
+                    self.remember_coords = (box[0],box[1],box[2],box[3])
+                    self.transform_x0 = True if canvas_x - box[0] <= 10 else False
+                    self.transform_y0 = True if canvas_y - box[1] <= 10 else False
+                    self.transform_x1 = True if box[2] - canvas_x <= 10 else False
+                    self.transform_y1 = True if box[3] - canvas_y <= 10 else False
+
+    def select_move(self, event: Event):
+        """
+        Bound to left mouse button held down. 
+        Part 2 of clicking-and-dragging to position a box.
+
+        Parameters
+        ----------
+        event: Event
+            the left mouse button held down event, the
+            coordinates of which are used to set the
+            box's bounds
+
+        Side Effects
+        -----------
+            box_x_position, box_width, box_y_position and box_height are changed
+        """
+        canvas_x = self.view.canvas.canvasx(event.x)
+        canvas_y = self.view.canvas.canvasy(event.y)
+        if self.tool_type == ToolType.TRANSFORM:
+            if self.transform_move == True:
+                self.view.box_x_position.set(canvas_x - self.transform_offset[0])
+                self.view.box_y_position.set(canvas_y - self.transform_offset[1])
+            else:
+                if self.transform_x0 == True:
+                    self.view.box_x_position.set(min(canvas_x,self.remember_coords[2]-1))
+                    self.view.box_width.set(self.remember_coords[2] - self.view.box_x_position.get())
+                elif self.transform_x1 == True:
+                    self.view.box_width.set(max(canvas_x-self.remember_coords[0],1))
+                if self.transform_y0 == True:
+                    self.view.box_y_position.set(min(canvas_y ,self.remember_coords[3]-1))
+                    self.view.box_height.set(self.remember_coords[3] - self.view.box_y_position.get())
+                elif self.transform_y1 == True:
+                    self.view.box_height.set(max(canvas_y -self.remember_coords[1],1))
+        else:
+            self.view.box_x_position.set(
+                min(self.view.mouse_down_x.get(), canvas_x))
+            self.view.box_width.set(abs(self.view.mouse_down_x.get() -
+                            canvas_x))
+            self.view.box_y_position.set(
+                min(self.view.mouse_down_y.get(), canvas_y))
+            self.view.box_height.set(abs(self.view.mouse_down_y.get() -
+                                canvas_y))
+        self.view.redraw_active_box()
+
     def select_end(self, event: Event):
         """
         Ends the click-and-drag to set the bounds of the current selection box
@@ -1057,9 +1215,38 @@ class Controller:
             Updates the model's selection item data
             Calls crop_image, updating the model's selecion item data and the GUI
         """
-        self.model.selection_item_data[self.path][self.view.selection_index].coords = (self.view.box_x_position.get(
-        ), self.view.box_y_position.get(), self.view.box_x_position.get()+self.view.box_width.get(), self.view.box_y_position.get()+self.view.box_height.get())
-        self.crop_image()
+        x0 = self.view.box_x_position.get()
+        y0 = self.view.box_y_position.get()
+        x1 = self.view.box_x_position.get()+self.view.box_width.get()
+        y1 = self.view.box_y_position.get()+self.view.box_height.get()
+        intersecting_boxes = list(set(self.view.canvas.find_overlapping(x0,y0, x1, y1)).intersection(set(self.view.box_ids)))
+        if self.tool_type == ToolType.CROP:
+            self.crop_intersecting_boxes((x0, y0, x1, y1), intersecting_boxes)
+        elif self.tool_type == ToolType.DELETE:
+            self.delete_intersecting_boxes(
+                intersecting_boxes)
+        elif self.tool_type == ToolType.JOIN:
+            self.join_intersecting_boxes(
+                intersecting_boxes)
+        elif self.tool_type == ToolType.SPLIT:
+            self.split_intersecting_boxes(
+                x0, intersecting_boxes)
+        elif self.tool_type == ToolType.ADD:
+            self.add_box((x0, y0, x1, y1))
+            self.run_all_ops_on_current_selection()
+        elif self.tool_type == ToolType.TRANSFORM:
+            self.model.selection_item_data[self.path][self.view.selection_index].coords = (
+                x0, y0, x1, y1)
+            self.transform_move = False
+            (self.transform_x0,self.transform_y0,self.transform_x1,self.transform_y1) = (False,False,False,False)
+            self.set_boxes(self.path)
+            self.run_all_ops_on_current_selection()
+        elif self.tool_type == ToolType.SELECT:
+            if len(intersecting_boxes) > 0:
+                self.view.sidepanel.selection_list.selection_clear(self.view.selection_index)
+                self.view.change_active_box(self.get_data_index_from_box_id(intersecting_boxes[0]))
+                self.load_selection_data(self.path,self.view.selection_index)
+        self.view.canvas.tag_lower(self.view.selection_box_id,self.view.image_id)
 
     def update_is_inverted_data(self, varname=None, idx=None, mode=None):
         """
@@ -1110,7 +1297,7 @@ class Controller:
             * The translation area is updated
             * Calls crop_image, updating the model's selecion item data and the GUI
         """
-        self.crop_image()
+        self.run_all_ops_on_current_selection()
 
     def run_translation_button_clicked(self, event=None):
         """
@@ -1130,13 +1317,9 @@ class Controller:
         """
         ocr_output = self.view.sidepanel.ocr_area.get("1.0", END)
         self.model.selection_item_data[self.path][self.view.selection_index].ocr_output = ocr_output
-        self.view.sidepanel.translation_area.delete("1.0", END)
-        if ocr_output != '':
-            translation = run_translation(ocr_output)
-            self.model.selection_item_data[self.path][self.view.selection_index].translation = translation
-            self.view.sidepanel.translation_area.insert(END, translation)
+        self.update_translation(ocr_output)
 
-    def crop_image(self):
+    def run_all_ops_on_current_selection(self):
         """
         Gets an image cropped to the bounds of the current selection box.
         Calls run_ocr on the cropped image.
@@ -1162,17 +1345,23 @@ class Controller:
         ), self.view.box_x_position.get()+self.view.box_width.get(), self.view.box_y_position.get()+self.view.box_height.get()])
         ocr_output = run_ocr(img2, self.model.selection_item_data[self.path][self.view.selection_index].is_inverted,
                              self.model.selection_item_data[self.path][self.view.selection_index].is_vertical, self.view.sidepanel.threshold.get())
-        self.model.selection_item_data[self.path][self.view.selection_index].ocr_output = ocr_output
-        self.view.sidepanel.ocr_area.delete("1.0", END)
-        self.view.sidepanel.ocr_area.insert(END, ocr_output)
-        self.view.sidepanel.translation_area.delete("1.0", END)
-        if ocr_output != '':
-            translation = run_translation(ocr_output)
-            self.model.selection_item_data[self.path][self.view.selection_index].translation = translation
-            self.view.sidepanel.translation_area.insert(END, translation)
+        self.update_ocr(ocr_output)
+        self.update_translation(ocr_output)
         self.model.selection_item_data[self.path][self.view.selection_index].threshold = self.view.sidepanel.threshold.get(
         )
         self.update_preview_image()
+
+    def update_translation(self, ocr_output: str):
+        self.view.sidepanel.translation_area.delete("1.0", END)
+        if ocr_output != '':
+            translation = get_translation(ocr_output)
+            self.model.selection_item_data[self.path][self.view.selection_index].translation = translation
+            self.view.sidepanel.translation_area.insert(END, translation)
+
+    def update_ocr(self, ocr_output: str):
+        self.model.selection_item_data[self.path][self.view.selection_index].ocr_output = ocr_output
+        self.view.sidepanel.ocr_area.delete("1.0", END)
+        self.view.sidepanel.ocr_area.insert(END, ocr_output)
 
     def update_preview_image(self, varname=None, idx=None, mode=None):
         """
@@ -1215,10 +1404,180 @@ class Controller:
         for i in self.model.selection_item_data[self.path]:
             draw.rectangle([(i.coords[0], i.coords[1]),
                            (i.coords[2], i.coords[3])], fill='white', width=0)
-            draw.text((i.coords[0], i.coords[1]), text=i.translation,
-                      font=ImageFont.truetype("arial"), fill='black')
-        img.save(self.source_directory + '/output/' + self.path.replace('.png', '-output.png'))
+            draw.text(((i.coords[0]+i.coords[2])/2, (i.coords[1]+i.coords[3])/2), text=self.text_wrap(i.translation,ImageFont.truetype("arial", 20),max_width=i.coords[2]-i.coords[0]),
+                      font=ImageFont.truetype("arial", 20), fill='black', anchor='mm')
+        img.save(self.source_directory + '/output/' +
+                 self.path.replace('.png', '-output.png'))
 
+    def toggle_display_mode_button_clicked(self, event=None):
+        """
+        Toggles between displaying the original or translated text.
+
+        Parameters
+        ----------
+        event: event
+            the button click event
+                not used
+
+        Side Effects
+        ------------
+            An image file is created.
+        """
+        if self.display_mode == "box":
+            self.display_mode = "preview"
+        else:
+            self.display_mode = "box"
+        self.set_boxes(self.path)
+
+    def get_bounding_boxes_button_clicked(self, event=None):
+        """
+        TODO
+
+        Parameters
+        ----------
+        event: event
+            the button click event
+                not used
+
+        Side Effects
+        ------------
+            TODO
+        """
+        self.view.box_ids.clear()
+        self.view.canvas.delete('selection')
+        img = make_ocr_ready(self.image, False, 127)
+        custom_config = r'-l jpn+eng --psm 6'
+        d = pytesseract.image_to_data(
+            img, output_type=Output.DICT, config=custom_config)
+        n_boxes = len(d['text'])
+        for i in range(n_boxes):
+            # if int(float(d['conf'][i])) > 60:
+            if int(d['level'][i]) == 4:
+                (x, y, w, h) = (d['left'][i], d['top']
+                                [i], d['width'][i], d['height'][i])
+                self.model.add_row(self.path)
+                self.model.selection_item_data[self.path][len(
+                    self.model.selection_item_data[self.path])-1].coords = (x,y,x+w,y+h)
+        self.update_gui_with_file_data(self.path)
+
+    def crop_intersecting_boxes(self, box: tuple[float, float, float, float], intersecting_boxes: list[int]):
+        for box_id in intersecting_boxes:
+            x0, y0, x1, y1 = self.view.canvas.coords(box_id)
+            x0 = max(x0, box[0])
+            y0 = max(y0, box[1])
+            x1 = min(x1, box[2])
+            y1 = min(y1, box[3])
+            self.model.selection_item_data[self.path][self.get_data_index_from_box_id(
+            box_id)].coords = (x0, y0, x1, y1)
+        self.update_gui_with_file_data(self.path)
+
+    def join_intersecting_boxes(self, intersecting_boxes: list[int]):
+        x0, y0, x1, y1 = self.get_bounding_box(intersecting_boxes)
+        self.model.selection_item_data[self.path][self.get_data_index_from_box_id(
+            intersecting_boxes[0])].coords = (x0, y0, x1, y1)
+        for box_id in intersecting_boxes:
+            if box_id != intersecting_boxes[0]:
+                self.model.delete_row(
+                    self.path, self.get_data_index_from_box_id(box_id))
+                self.view.box_ids.remove(box_id)
+        self.update_gui_with_file_data(self.path)
+
+    def get_bounding_box(self, intersecting_boxes: list[int]):
+        x0,y0,x1,y1 = self.view.canvas.coords(intersecting_boxes[0])
+        for box_id in intersecting_boxes:
+            box = self.view.canvas.coords(box_id)
+            x0 = min(x0, box[0])
+            y0 = min(y0, box[1])
+            x1 = max(x1, box[2])
+            y1 = max(y1, box[3])
+        return (x0,y0,x1,y1)
+
+    def get_data_index_from_box_id(self, box_id):
+        return self.view.box_ids.index(box_id)
+
+    def delete_intersecting_boxes(self, intersecting_boxes: list[int]):
+        for box_id in intersecting_boxes:
+            self.model.delete_row(self.path, self.get_data_index_from_box_id(box_id))
+            self.view.box_ids.remove(box_id)
+        self.update_gui_with_file_data(self.path)
+
+    def split_intersecting_boxes(self, x: float, intersecting_boxes: list[int]):
+        for box_id in intersecting_boxes:
+            x0, y0, x1, y1 = self.view.canvas.coords(box_id)
+            self.model.selection_item_data[self.path][self.get_data_index_from_box_id(
+                box_id)].coords = (x0, y0, x, y1)
+            self.model.add_row(self.path)
+            self.add_box((x, y0, x1, y1))
+        self.update_gui_with_file_data(self.path)
+
+    def add_box(self, box: tuple[float, float, float, float]):
+        self.model.add_row(self.path)
+        self.model.selection_item_data[self.path][len(
+            self.model.selection_item_data[self.path])-1].coords = box
+        self.update_gui_with_file_data(self.path)
+
+    def next_tool_type(self):
+        if self.tool_type == ToolType.SELECT:
+            self.tool_type = ToolType.ADD
+        elif self.tool_type == ToolType.ADD:
+            self.tool_type = ToolType.CROP
+        elif self.tool_type == ToolType.CROP:
+            self.tool_type = ToolType.DELETE
+        elif self.tool_type == ToolType.DELETE:
+            self.tool_type = ToolType.JOIN
+        elif self.tool_type == ToolType.JOIN:
+            self.tool_type = ToolType.SPLIT
+        elif self.tool_type == ToolType.SPLIT:
+            self.tool_type = ToolType.TRANSFORM
+        elif self.tool_type == ToolType.TRANSFORM:
+            self.tool_type = ToolType.SELECT
+        self.view.sidepanel.tool_type_label.configure(text=self.tool_type.name)
+
+    def prev_tool_type(self):
+        if self.tool_type == ToolType.SELECT:
+            self.tool_type = ToolType.TRANSFORM
+        elif self.tool_type == ToolType.ADD:
+            self.tool_type = ToolType.SELECT
+        elif self.tool_type == ToolType.CROP:
+            self.tool_type = ToolType.ADD
+        elif self.tool_type == ToolType.DELETE:
+            self.tool_type = ToolType.CROP
+        elif self.tool_type == ToolType.JOIN:
+            self.tool_type = ToolType.DELETE
+        elif self.tool_type == ToolType.SPLIT:
+            self.tool_type = ToolType.JOIN
+        elif self.tool_type == ToolType.TRANSFORM:
+            self.tool_type = ToolType.SPLIT
+        self.view.sidepanel.tool_type_label.configure(text=self.tool_type.name)
+
+    def set_tool_type(self, tool_type):
+        self.tool_type = tool_type
+        self.view.sidepanel.tool_type_label.configure(text=self.tool_type.name)
+    
+    def text_wrap(self, text:str, font: ImageFont, max_width):
+        lines = ""
+        # If the width of the text is smaller than image width
+        # we don't need to split it, just add it to the lines array
+        # and return
+        if font.getlength(text) <= max_width:
+            lines = text
+        else:
+            # split the line by spaces to get words
+            words = text.split(' ')  
+            i = 0
+            # append every word to a line while its width is shorter than image width
+            while i < len(words):
+                line = ''         
+                while i < len(words) and font.getlength(line + words[i]) <= max_width:                
+                    line = line + words[i] + " "
+                    i += 1
+                if not line:
+                    line = words[i]
+                    i += 1
+                # when the line gets longer than the max width do not append the word, 
+                # add the line to the lines array
+                lines = lines + "\n" + line if lines else line
+        return lines
 
 if __name__ == '__main__':
     c = Controller()
